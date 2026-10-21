@@ -54,59 +54,66 @@ Canny 엣지 비율이 낮으면 "소자 부재"로 판정 → **부재는 해�
 
 ---
 
-## 최종 해법: YOLOE로 소자 영역만 PatchCore
+## 최종 해법: YOLOE 검출 영역의 패치만 PatchCore
 
 배경을 점수에서 빼는 가장 확실한 방법은 **소자 영역만 보는 것**. 라벨링 없이 소자를 찾기 위해 제로샷 검출 모델 **YOLOE(visual prompt)** 를 사용했다.
+
+핵심은 **이미지를 자르지 않는다는 점**이다. 전체 이미지를 그대로 PatchCore에 넣되, YOLOE가 찾은 **소자 박스 안 패치만** 점수에 사용한다. (이미지를 crop해 저장하는 방식도 시도했으나, 소자 위치가 제각각이라 crop마다 포함되는 배경이 달라져 성능이 더 나빴다 — 아래 "버린 방식" 참고.)
 
 ```
 소자 예시 박스 1개 지정(visual prompt)
         │
         ▼
 각 이미지에서 소자 검출
-   ├─ 검출 실패 → 소자 부재 → label 1      ← (A) 해결
-   └─ 검출 성공 → 소자 박스 crop
+   ├─ 검출 실패 → 소자 부재 → label 1              ← (A) 해결
+   └─ 검출 성공 → 박스를 feature map 좌표로 환산
                     │
                     ▼
-            crop 영역만 PatchCore 점수        ← (B) 배경이 crop 밖 → 무시
+       전체 패치 중 "박스 안 패치"만 선택해 점수      ← (B) 박스 밖 배경은 점수에서 제외
                     │
                     ▼
-            score > threshold → 0/1
+            박스 안 패치 거리의 max > threshold → 0/1
 ```
 
 **왜 두 문제가 동시에 풀렸나**
 - **(A) 소자 부재**: YOLOE가 소자를 못 찾음 = 검출 실패 → label 1. 엣지 추정보다 정확하다 (밝기가 아니라 "소자라는 객체"를 직접 판단).
-- **(B) 배경 이물질**: 소자 박스 밖은 애초에 점수에 들어가지 않으므로, 배경이 아무리 지저분해도 무시된다.
+- **(B) 배경 이물질**: 소자 박스 밖 패치는 점수 계산에서 제외되므로, 배경이 아무리 지저분해도 무시된다.
 
 ### YOLOE를 택한 이유
 - 반도체 소자는 일반 객체가 아니라 **텍스트 프롬프트로는 검출 실패** → 소자 예시 박스를 주는 **visual prompt** 방식 채택
 - 소자 위치·크기가 제각각이어도 "이렇게 생긴 것"을 **위치 무관**으로 검출
 - 라벨링 없이 즉시 적용 가능 (대회 환경에 적합)
 
-### crop 전처리
-- 박스에 여유 패딩(10%)을 줘 소자 **가장자리 결함**이 잘리지 않게 함
-- 짧은 쪽을 **흰색 여백으로 정사각 패딩** 후 512로 리사이즈 → 비율 왜곡 방지
-- 학습·추론에 **완전히 동일한 crop 파이프라인** 적용
+### 박스 → 패치 선택
+- 이미지는 그대로 512로 넣고 feature map(예: 64×64 패치)을 얻음
+- YOLOE 박스를 feature map 좌표로 환산해 **박스 안 패치만 선택**, 나머지는 버림
+- 박스에 여유 패딩(약 5~10%)을 줘 소자 **가장자리 결함**을 놓치지 않음
+- 학습(메모리뱅크)·추론에 **동일한 예시 박스**(`ref_boxes.npy`)를 사용
+
+### 버린 방식: 이미지 crop 저장
+초기에는 소자를 **잘라내 흰색 패딩 후 저장**하는 방식(`train_crop/`)도 썼으나, 소자 위치가 이미지마다 달라 **crop 박스에 포함되는 배경이 제각각**이 되었고, 이 변동이 다시 오탐을 유발해 **성능이 더 낮았다**. 그래서 이미지를 자르지 않고 "박스 안 패치만 점수에 쓰는" 방식으로 전환했다.
 
 ---
 
 ## 파이프라인
 
 ```
-[학습]
-train 정상 이미지 ──YOLOE crop──> 소자 crop ──WideResNet50 패치특징──> coreset ──> memory_bank.npz
+[학습]  (이미지를 자르지 않음)
+train 정상 이미지 ──WideResNet50 패치특징──> YOLOE 박스 안 패치만 선택 ──coreset──> memory_bank.npz
 
 [추론]
 test 이미지 ──YOLOE 검출──┬─ 실패 → label 1 (소자 부재)
-                          └─ crop → PatchCore 거리 → threshold → 0/1 ──> submission.csv
+                          └─ 박스 안 패치만 PatchCore 거리 → threshold → 0/1 ──> submission.csv
 ```
 
 | 구성 | 선택 |
 |------|------|
 | 특징 추출 | WideResNet50 (layer2 + layer3) |
-| 입력 크기 | 512×512 (원본 크기와 동일) |
+| 입력 크기 | 512×512 (원본 크기와 동일, crop·리사이즈 없음) |
+| 영역 선택 | YOLOE 박스를 feature map 좌표로 환산해 박스 안 패치만 사용 |
 | 메모리뱅크 압축 | coreset (GPU greedy FPS) |
 | 거리 계산 | `torch.cdist` (GPU) |
-| 이상점수 | 소자 영역 패치 거리의 max |
+| 이상점수 | 박스 안 패치 거리의 max |
 | 소자 검출 | YOLOE-11s-seg, visual prompt |
 
 ---
@@ -116,17 +123,19 @@ test 이미지 ──YOLOE 검출──┬─ 실패 → label 1 (소자 부재)
 ```bash
 pip install -U ultralytics torch torchvision opencv-python numpy
 
-# 1) 소자 crop (학습/추론 각각, 같은 예시 박스 사용)
-python yoloe_crop.py --ref train/Train_000.png --img_dir train --out train_crop
-python yoloe_crop.py --ref train/Train_000.png --img_dir test  --out test_crop
+# 1) 학습: 전체 이미지 → YOLOE 박스 안 패치만 메모리뱅크 구축
+#    최초 1회 드래그로 소자 예시 박스 지정 → ref_boxes.npy 저장(추론과 공유)
+python new_train_patchcore.py --train_dir train \
+    --ref_image train/Train_000.png \
+    --save memory_bank.npz --input_size 512
 
-# 2) 학습: 소자 crop으로 메모리뱅크 구축
-python train_patchcore.py --train_dir train_crop --save memory_bank.npz --input_size 512
-
-# 3) 추론: 소자 crop으로 점수 → 제출 CSV + 히트맵
-python infer_submission.py --bank memory_bank.npz --img_dir test_crop \
-    --absent test_crop/absent_list.txt --threshold 3.0
+# 2) 추론: 전체 이미지 → 박스 안 패치만 점수 → 제출 CSV + 히트맵
+#    검출 실패(소자 부재)는 자동 label 1
+python new_infer_submission.py --bank memory_bank.npz --img_dir test \
+    --ref_image train/Train_000.png --threshold 3.0
 ```
+
+> 학습·추론이 **같은 `ref_boxes.npy`(예시 박스)** 를 쓰므로 소자 검출 기준이 일치한다.
 
 ---
 
@@ -149,9 +158,9 @@ python infer_submission.py --bank memory_bank.npz --img_dir test_crop \
 
 | 파일 | 역할 |
 |------|------|
-| `yoloe_crop.py` | YOLOE visual prompt로 소자 검출 → 흰색 패딩 crop 저장 |
-| `train_patchcore.py` | 소자 crop으로 메모리뱅크(coreset) 구축 |
-| `infer_submission.py` | 소자 crop 추론 → 제출 CSV + 히트맵 (부재는 label 1) |
+| `device_region.py` | YOLOE visual prompt로 소자 박스 검출 → feature map의 박스 안 패치 마스크 생성 (학습·추론 공용) |
+| `new_train_patchcore.py` | 전체 이미지에서 박스 안 패치만 모아 메모리뱅크(coreset) 구축 |
+| `new_infer_submission.py` | 박스 안 패치만 점수 → 제출 CSV + 히트맵 (검출 실패는 label 1) |
 
 
 # anomaly_detection_semiconductor
