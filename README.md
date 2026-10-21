@@ -1,7 +1,27 @@
 # 반도체 소자 이상탐지 (PatchCore + YOLOE)
 
-> DACON 반도체 소자 이상탐지 대회 · **Public Score 1위**
+> DACON 반도체 소자 이상탐지 대회 · **Public Score 1.0**
 > 정상 이미지만으로 학습하는 비지도 이상탐지 — PatchCore에 제로샷 객체 검출(YOLOE)을 결합해 배경 노이즈 문제를 해결
+
+---
+
+## 프로젝트 개요
+
+| 항목 | 내용 |
+|------|------|
+| **과제** | 반도체 소자 이미지의 정상/이상(0/1) 분류 |
+| **데이터** | 흰 배경 보드 + 검은 소자, 512×512 · **정상 이미지만 학습 제공** |
+| **평가** | Binary F1 Score |
+| **핵심 기법** | PatchCore (비지도 이상탐지) + YOLOE (제로샷 소자 검출) |
+| **백본** | WideResNet50 (layer2 + layer3) |
+| **성과** | DACON Public Score **1.0** |
+
+**한 줄 요약** — 정상 패치 분포와의 거리로 이상을 판정하는 PatchCore에, YOLOE로 찾은 **소자 영역 패치만** 입력해 배경 이물질 오탐과 소자 부재 오판을 동시에 해결했다.
+
+**문제 → 해결 흐름**
+1. 전체 이미지 PatchCore → 배경 이물질을 결함으로 오탐, 소자 부재를 정상으로 오판
+2. 엣지 게이트로 부재는 잡았으나 배경 오탐은 그대로
+3. **YOLOE로 소자 영역만 PatchCore** → 두 문제 동시 해결, 성능 최고
 
 ---
 
@@ -125,13 +145,13 @@ pip install -U ultralytics torch torchvision opencv-python numpy
 
 # 1) 학습: 전체 이미지 → YOLOE 박스 안 패치만 메모리뱅크 구축
 #    최초 1회 드래그로 소자 예시 박스 지정 → ref_boxes.npy 저장(추론과 공유)
-python new_train_patchcore.py --train_dir train \
+python train_patchcore.py --train_dir train \
     --ref_image train/Train_000.png \
     --save memory_bank.npz --input_size 512
 
 # 2) 추론: 전체 이미지 → 박스 안 패치만 점수 → 제출 CSV + 히트맵
 #    검출 실패(소자 부재)는 자동 label 1
-python new_infer_submission.py --bank memory_bank.npz --img_dir test \
+python infer_submission.py --bank memory_bank.npz --img_dir test \
     --ref_image train/Train_000.png --threshold 3.0
 ```
 
@@ -159,20 +179,5 @@ python new_infer_submission.py --bank memory_bank.npz --img_dir test \
 | 파일 | 역할 |
 |------|------|
 | `device_region.py` | YOLOE visual prompt로 소자 박스 검출 → feature map의 박스 안 패치 마스크 생성 (학습·추론 공용) |
-| `new_train_patchcore.py` | 전체 이미지에서 박스 안 패치만 모아 메모리뱅크(coreset) 구축 |
-| `new_infer_submission.py` | 박스 안 패치만 점수 → 제출 CSV + 히트맵 (검출 실패는 label 1) |
-
-
-# anomaly_detection_semiconductor
-new_train_patchcore.py
-
-new_infer_submission.py
-
-device_region.py
-
-infer_visualize_semicon.py 성능개선 과정
-
-infer_visualize_semicon2.py 성능개선 과정
-
-infer_visualize_semicon3.py 성능개선 과정
-
+| `train_patchcore.py` | 전체 이미지에서 박스 안 패치만 모아 메모리뱅크(coreset) 구축 |
+| `infer_submission.py` | 박스 안 패치만 점수 → 제출 CSV + 히트맵 (검출 실패는 label 1) |
